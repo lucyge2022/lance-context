@@ -240,8 +240,6 @@ pub(crate) struct StorageBase {
     /// Wrapped in [`ArcSwap`] so a merge/compact/reload can publish a new
     /// handle without requiring exclusive `&mut` for every reader.
     pub dataset: ArcSwap<Dataset>,
-    /// Dataset URI; stable for the lifetime of this handle.
-    uri: String,
     /// MemWAL shard this instance writes to (derived from `shard_id`).
     pub write_shard: Uuid,
     /// Object-store options, retained so a self-merge can re-append flushed
@@ -375,10 +373,8 @@ impl StorageBase {
             .into());
         }
 
-        let uri = dataset.uri().to_string();
         let mut base = Self {
             dataset: ArcSwap::from_pointee(dataset),
-            uri,
             write_shard: derive_shard_id(shard_id.as_deref()),
             storage_options,
             session,
@@ -400,8 +396,8 @@ impl StorageBase {
 
     /// URI of the underlying Lance dataset.
     #[must_use]
-    pub fn uri(&self) -> &str {
-        &self.uri
+    pub fn uri(&self) -> String {
+        self.current_dataset().uri().to_string()
     }
 
     /// Current base dataset manifest version.
@@ -1204,8 +1200,9 @@ impl StorageBase {
     /// Reload the base dataset handle through [`Self::load_with_options`], so
     /// the shared session and storage options are never dropped.
     pub async fn reload(&mut self) -> LanceResult<()> {
+        let uri = self.uri();
         let dataset = Self::load_with_options(
-            &self.uri,
+            &uri,
             self.storage_options.clone(),
             self.session.clone(),
         )
@@ -1266,7 +1263,7 @@ impl StorageBase {
     pub fn flushed_generation_uri(&self, shard_id: Uuid, path: &str) -> String {
         format!(
             "{}/_mem_wal/{shard_id}/{path}",
-            self.uri.trim_end_matches('/')
+            self.uri().trim_end_matches('/')
         )
     }
 
