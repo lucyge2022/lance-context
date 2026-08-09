@@ -649,7 +649,7 @@ impl ContextStore {
     /// URI of the underlying Lance dataset.
     #[must_use]
     pub fn uri(&self) -> &str {
-        self.base.dataset.uri()
+        self.base.uri()
     }
 
     /// Distance metric this context ranks vector-search results with.
@@ -1364,7 +1364,7 @@ impl ContextStore {
 
     fn has_relationships_column(&self) -> bool {
         self.base
-            .dataset
+            .current_dataset()
             .schema()
             .field_paths()
             .iter()
@@ -1373,7 +1373,7 @@ impl ContextStore {
 
     fn has_external_id_column(&self) -> bool {
         self.base
-            .dataset
+            .current_dataset()
             .schema()
             .field_paths()
             .iter()
@@ -1395,10 +1395,11 @@ impl ContextStore {
         }
 
         let schema = Arc::new(Schema::new(vec![relationship_field()]));
-        self.base
-            .dataset
+        let mut dataset = (*self.base.current_dataset()).clone();
+        dataset
             .add_columns(NewColumnTransform::AllNulls(schema), None, None)
             .await?;
+        self.base.set_dataset(dataset);
         self.base.clear_version_pin();
         Ok(true)
     }
@@ -1422,7 +1423,7 @@ impl ContextStore {
     /// Retrieve a single record by its unique ID.
     pub async fn get(&self, id: &str) -> LanceResult<Option<ContextRecord>> {
         let escaped_id = id.replace('\'', "''");
-        let mut scanner = self.base.dataset.scan();
+        let mut scanner = self.base.current_dataset().scan();
         scanner.filter(&format!("id = '{}'", escaped_id))?;
         scanner.limit(Some(1), None)?;
 
@@ -1819,7 +1820,7 @@ impl ContextStore {
     /// filtering and metadata stay correct).
     fn projected_columns(&self, projection: ReadProjection) -> Vec<String> {
         self.base
-            .dataset
+            .current_dataset()
             .schema()
             .fields
             .iter()
@@ -1878,7 +1879,7 @@ impl ContextStore {
 
         info!(
             "Starting compaction: {} fragments",
-            self.base.dataset.count_fragments()
+            self.base.current_dataset().count_fragments()
         );
         let start = std::time::Instant::now();
 
@@ -1987,7 +1988,7 @@ impl ContextStore {
 
     /// Check if compaction should run based on configuration thresholds.
     pub async fn should_compact(&self) -> LanceResult<bool> {
-        let fragment_count = self.base.dataset.count_fragments();
+        let fragment_count = self.base.current_dataset().count_fragments();
 
         if fragment_count < self.compaction_config.min_fragments {
             return Ok(false);
@@ -2014,7 +2015,7 @@ impl ContextStore {
         let state = self.compaction_state.lock().await;
 
         Ok(CompactionStats {
-            total_fragments: self.base.dataset.count_fragments(),
+            total_fragments: self.base.current_dataset().count_fragments(),
             is_compacting: state.is_compacting,
             last_compaction: state.last_compaction,
             last_error: state.last_error.clone(),
@@ -2028,7 +2029,7 @@ impl ContextStore {
             return Ok(());
         }
 
-        let indices = self.base.dataset.load_indices().await?;
+        let indices = self.base.current_dataset().load_indices().await?;
         if indices.iter().any(|i| i.name == ID_INDEX_NAME) {
             return Ok(());
         }
@@ -2048,12 +2049,13 @@ impl ContextStore {
 
         let params = ScalarIndexParams::default();
 
-        self.base
-            .dataset
+        let mut dataset = (*self.base.current_dataset()).clone();
+        dataset
             .create_index_builder(&["id"], index_type, &params)
             .name(ID_INDEX_NAME.to_string())
             .replace(true)
             .await?;
+        self.base.set_dataset(dataset);
 
         // Reload through the base so the new index is visible to subsequent
         // reads, keeping the storage options and session (a bare
@@ -2321,42 +2323,42 @@ impl ContextStore {
     fn records_to_batch(&self, entries: &[ContextRecord]) -> LanceResult<RecordBatch> {
         let include_external_id = self
             .base
-            .dataset
+            .current_dataset()
             .schema()
             .field_paths()
             .iter()
             .any(|path| path == "external_id");
         let include_lifecycle = self
             .base
-            .dataset
+            .current_dataset()
             .schema()
             .field_paths()
             .iter()
             .any(|path| path == "expires_at");
         let include_metadata = self
             .base
-            .dataset
+            .current_dataset()
             .schema()
             .field_paths()
             .iter()
             .any(|path| path == "metadata");
         let include_tenant = self
             .base
-            .dataset
+            .current_dataset()
             .schema()
             .field_paths()
             .iter()
             .any(|path| path == "tenant");
         let include_source = self
             .base
-            .dataset
+            .current_dataset()
             .schema()
             .field_paths()
             .iter()
             .any(|path| path == "source");
         let include_external_reference = self
             .base
-            .dataset
+            .current_dataset()
             .schema()
             .field_paths()
             .iter()
@@ -2681,7 +2683,7 @@ impl ContextStore {
             ]);
         }
 
-        let schema: Arc<Schema> = Arc::new(self.base.dataset.schema().into());
+        let schema: Arc<Schema> = Arc::new(self.base.current_dataset().schema().into());
         let arrays = schema
             .fields()
             .iter()
@@ -5544,7 +5546,7 @@ mod tests {
                 .unwrap();
 
             // Index should be created eagerly on open
-            let indices = store.base.dataset.load_indices().await.unwrap();
+            let indices = store.base.current_dataset().load_indices().await.unwrap();
             assert!(
                 indices.iter().any(|i| i.name == ID_INDEX_NAME),
                 "btree index should be created on open"
@@ -5560,7 +5562,7 @@ mod tests {
             store.compact(None).await.unwrap();
 
             // Index should still exist after compaction
-            let indices = store.base.dataset.load_indices().await.unwrap();
+            let indices = store.base.current_dataset().load_indices().await.unwrap();
             assert!(
                 indices.iter().any(|i| i.name == ID_INDEX_NAME),
                 "btree index should persist after compaction"
@@ -5584,7 +5586,7 @@ mod tests {
                 .unwrap();
 
             // Index should be created eagerly on open
-            let indices = store.base.dataset.load_indices().await.unwrap();
+            let indices = store.base.current_dataset().load_indices().await.unwrap();
             assert!(
                 indices.iter().any(|i| i.name == ID_INDEX_NAME),
                 "zonemap index should be created on open"
@@ -5598,7 +5600,7 @@ mod tests {
             }
             store.compact(None).await.unwrap();
 
-            let indices = store.base.dataset.load_indices().await.unwrap();
+            let indices = store.base.current_dataset().load_indices().await.unwrap();
             assert!(
                 indices.iter().any(|i| i.name == ID_INDEX_NAME),
                 "zonemap index should persist after compaction"
@@ -5618,7 +5620,7 @@ mod tests {
             store.add(&[text_record("no-idx-1", 0.0)]).await.unwrap();
             store.compact(None).await.unwrap();
 
-            let indices = store.base.dataset.load_indices().await.unwrap();
+            let indices = store.base.current_dataset().load_indices().await.unwrap();
             assert!(
                 !indices.iter().any(|i| i.name == ID_INDEX_NAME),
                 "no id index should be created when IdIndexType::None"

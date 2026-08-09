@@ -117,7 +117,7 @@ impl DatagenStore {
 
     #[must_use]
     pub fn uri(&self) -> &str {
-        self.base.dataset.uri()
+        self.base.uri()
     }
 
     #[must_use]
@@ -327,7 +327,7 @@ impl DatagenStore {
             }
         }
 
-        Ok(Self::get_blob_from_dataset(&self.base.dataset, event_id)
+        Ok(Self::get_blob_from_dataset(self.base.current_dataset().as_ref(), event_id)
             .await?
             .flatten())
     }
@@ -520,7 +520,7 @@ impl DatagenStore {
 
     fn non_blob_columns(&self) -> Vec<String> {
         self.base
-            .dataset
+            .current_dataset()
             .schema()
             .fields
             .iter()
