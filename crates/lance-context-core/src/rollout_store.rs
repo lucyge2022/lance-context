@@ -461,7 +461,7 @@ impl RolloutStore {
 
     /// Checkout a specific dataset version — recovers the exact rollout set that
     /// trained a checkpoint (spec §3, reproducibility).
-    pub async fn checkout(&mut self, version_id: u64) -> LanceResult<()> {
+    pub async fn checkout(&self, version_id: u64) -> LanceResult<()> {
         self.base.checkout(version_id).await
     }
 
@@ -480,7 +480,7 @@ impl RolloutStore {
     /// Long-lived read handles call this before a new request so compaction or
     /// WAL merges committed by another process become visible without paying
     /// the cost of reopening the dataset and rebuilding all session caches.
-    pub async fn refresh_latest(&mut self) -> LanceResult<()> {
+    pub async fn refresh_latest(&self) -> LanceResult<()> {
         self.base.refresh_latest().await
     }
 
@@ -548,14 +548,14 @@ impl RolloutStore {
 
     /// Gracefully close the resident writer, draining its background tasks.
     /// Idempotent. See `StorageBase::close`.
-    pub async fn close(&mut self) -> LanceResult<()> {
+    pub async fn close(&self) -> LanceResult<()> {
         self.base.close().await
     }
 
     /// Merge this instance's flushed generations into the base table **if** the
     /// shard has accumulated at least `merge_after_generations` of them (the
     /// count trigger; `0` disables it). No-op otherwise.
-    pub async fn maybe_merge_own_shard(&mut self) -> LanceResult<usize> {
+    pub async fn maybe_merge_own_shard(&self) -> LanceResult<usize> {
         self.base.maybe_merge_own_shard().await
     }
 
@@ -578,7 +578,7 @@ impl RolloutStore {
 
     /// Commit a merge prepared by [`Self::prepare_merge_if_ready`].
     pub async fn commit_prepared_merge(
-        &mut self,
+        &self,
         manifest_store: &ShardManifestStore,
         manifest: &ShardManifest,
         prepared: PreparedMerge,
@@ -592,7 +592,7 @@ impl RolloutStore {
     /// then fold **every** pending flushed generation into the base table. This
     /// is the *time* half of the "time OR count" trigger and is deliberately not
     /// gated by the count threshold. See `StorageBase::cleanup_own_shard`.
-    pub async fn cleanup_own_shard(&mut self) -> LanceResult<usize> {
+    pub async fn cleanup_own_shard(&self) -> LanceResult<usize> {
         self.base.cleanup_own_shard().await
     }
 
@@ -602,7 +602,7 @@ impl RolloutStore {
     /// compaction rewrites the shared base table and two concurrent `Rewrite`
     /// commits conflict. See `StorageBase::compact`.
     pub async fn compact(
-        &mut self,
+        &self,
         options: Option<CompactionConfig>,
     ) -> LanceResult<CompactionMetrics> {
         self.base.compact(options).await
@@ -610,7 +610,7 @@ impl RolloutStore {
 
     /// Build a ZoneMap scalar index on the base table's `id` column. Idempotent.
     /// See `StorageBase::create_key_zonemap_index`.
-    pub async fn create_id_zonemap_index(&mut self) -> LanceResult<()> {
+    pub async fn create_id_zonemap_index(&self) -> LanceResult<()> {
         self.base.create_key_zonemap_index().await
     }
 
@@ -2881,7 +2881,7 @@ mod tests {
         let uri = dir.path().to_string_lossy().to_string();
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
-            let mut store = RolloutStore::open_with_options(
+            let store = RolloutStore::open_with_options(
                 &uri,
                 RolloutStoreOptions {
                     shard_id: Some("trajectory-test".to_string()),
@@ -3031,7 +3031,7 @@ mod tests {
         let uri = dir.path().to_string_lossy().to_string();
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
-            let mut store = RolloutStore::open_with_options(
+            let store = RolloutStore::open_with_options(
                 &uri,
                 RolloutStoreOptions {
                     storage_options: None,
@@ -3203,7 +3203,7 @@ mod tests {
         let artifact_bytes = b"\x00\x01\x02compacted";
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
-            let mut store = RolloutStore::open_with_options(
+            let store = RolloutStore::open_with_options(
                 &uri,
                 RolloutStoreOptions {
                     storage_options: None,
@@ -3333,7 +3333,7 @@ mod tests {
             .unwrap();
         runtime.block_on(async {
             // Seed the base table via A with several fragments to compact.
-            let mut a = RolloutStore::open_with_options(
+            let a = RolloutStore::open_with_options(
                 &uri,
                 RolloutStoreOptions {
                     storage_options: None,
@@ -3435,7 +3435,7 @@ mod tests {
         let artifact_bytes = b"\x00\x01\x02merged-trace";
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
-            let mut store = RolloutStore::open_with_options(
+            let store = RolloutStore::open_with_options(
                 &uri,
                 RolloutStoreOptions {
                     storage_options: None,
@@ -3491,7 +3491,7 @@ mod tests {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
             {
-                let mut store = RolloutStore::open_with_options(
+                let store = RolloutStore::open_with_options(
                     &uri,
                     RolloutStoreOptions {
                         storage_options: None,
