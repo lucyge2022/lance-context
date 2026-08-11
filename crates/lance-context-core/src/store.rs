@@ -2116,7 +2116,7 @@ impl ContextStore {
             loop {
                 interval.tick().await;
 
-                let mut store = match open_for_compaction(&uri, compaction_options.clone()).await {
+                let store = match open_for_compaction(&uri, compaction_options.clone()).await {
                     Ok(store) => store,
                     Err(e) => {
                         error!("Background compaction could not open store: {}", e);
@@ -4456,7 +4456,7 @@ mod tests {
             .await
             .unwrap();
 
-            let mut store = ContextStore::open(&uri).await.unwrap();
+            let store = ContextStore::open(&uri).await.unwrap();
             assert!(!store.has_relationships_column());
 
             let mut record = text_record("with-relationships", 0.0);
@@ -5031,7 +5031,7 @@ mod tests {
         let uri = dir.path().to_string_lossy().to_string();
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
-            let mut store = ContextStore::open(&uri).await.unwrap();
+            let store = ContextStore::open(&uri).await.unwrap();
             for i in 0..3 {
                 store
                     .add(&[text_record(&format!("r{i}"), i as f32)])
@@ -5541,7 +5541,7 @@ mod tests {
                 id_index_type: IdIndexType::BTree,
                 ..Default::default()
             };
-            let mut store = ContextStore::open_with_options(&uri, options)
+            let store = ContextStore::open_with_options(&uri, options)
                 .await
                 .unwrap();
 
@@ -5581,7 +5581,7 @@ mod tests {
                 id_index_type: IdIndexType::ZoneMap,
                 ..Default::default()
             };
-            let mut store = ContextStore::open_with_options(&uri, options)
+            let store = ContextStore::open_with_options(&uri, options)
                 .await
                 .unwrap();
 
@@ -5615,7 +5615,7 @@ mod tests {
         let runtime = tokio::runtime::Runtime::new().unwrap();
 
         runtime.block_on(async {
-            let mut store = ContextStore::open(&uri).await.unwrap();
+            let store = ContextStore::open(&uri).await.unwrap();
 
             store.add(&[text_record("no-idx-1", 0.0)]).await.unwrap();
             store.compact(None).await.unwrap();
@@ -5639,7 +5639,7 @@ mod tests {
                 id_index_type: IdIndexType::BTree,
                 ..Default::default()
             };
-            let mut store = ContextStore::open_with_options(&uri, options)
+            let store = ContextStore::open_with_options(&uri, options)
                 .await
                 .unwrap();
 

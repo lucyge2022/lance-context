@@ -2147,7 +2147,7 @@ mod tests {
         let legacy_schema = pre_claim_check_schema();
         create_empty_dataset(&uri, legacy_schema.clone()).await;
 
-        let mut store = RolloutStore::open_with_options(
+        let store = RolloutStore::open_with_options(
             &uri,
             RolloutStoreOptions {
                 shard_id: Some("pre-claim-check".to_string()),
@@ -2460,7 +2460,7 @@ mod tests {
 
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
-            let mut store = RolloutStore::open_with_options(
+            let store = RolloutStore::open_with_options(
                 &uri,
                 RolloutStoreOptions {
                     storage_options: None,
@@ -2741,7 +2741,7 @@ mod tests {
         let uri = dir.path().to_string_lossy().to_string();
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
-            let mut store = RolloutStore::open_with_options(
+            let store = RolloutStore::open_with_options(
                 &uri,
                 RolloutStoreOptions {
                     shard_id: Some("fragment-pagination".to_string()),
@@ -2834,7 +2834,7 @@ mod tests {
             writer.add(&[assistant_record("row-0")]).await.unwrap();
             writer.flush().await.unwrap();
 
-            let mut cached_reader =
+            let cached_reader =
                 RolloutStore::open_existing_with_options(&uri, RolloutStoreOptions::default())
                     .await
                     .unwrap();
@@ -2864,7 +2864,7 @@ mod tests {
         let uri = dir.path().to_string_lossy().to_string();
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
-            let mut store = RolloutStore::open(&uri).await.unwrap();
+            let store = RolloutStore::open(&uri).await.unwrap();
             assert!(!store.is_version_pinned());
 
             store.checkout(store.version()).await.unwrap();
@@ -3070,7 +3070,7 @@ mod tests {
         let uri = dir.path().to_string_lossy().to_string();
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
-            let mut store = RolloutStore::open_with_options(
+            let store = RolloutStore::open_with_options(
                 &uri,
                 RolloutStoreOptions {
                     storage_options: None,
@@ -3373,11 +3373,11 @@ mod tests {
             // A compacts the base table; B merges its shard into it — concurrently.
             let (ca, mb) = tokio::join!(
                 async {
-                    let mut g = a.write().await;
+                    let g = a.write().await;
                     g.compact(None).await
                 },
                 async {
-                    let mut g = b.write().await;
+                    let g = b.write().await;
                     g.cleanup_own_shard().await
                 },
             );
@@ -3530,7 +3530,7 @@ mod tests {
         let uri = dir.path().to_string_lossy().to_string();
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
-            let mut store = RolloutStore::open_with_options(
+            let store = RolloutStore::open_with_options(
                 &uri,
                 RolloutStoreOptions {
                     storage_options: None,
@@ -3568,7 +3568,7 @@ mod tests {
     fn cleanup_merges_pre_claim_check_generations_after_schema_evolution() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
-            let (_dir, mut store) = store_with_legacy_base_and_wal(false).await;
+            let (_dir, store) = store_with_legacy_base_and_wal(false).await;
 
             assert_eq!(store.cleanup_own_shard().await.unwrap(), 1);
             assert_eq!(flushed_generation_count(&store).await, 0);
@@ -3599,7 +3599,7 @@ mod tests {
             let legacy_dir = TempDir::new().unwrap();
             let legacy_uri = legacy_dir.path().to_string_lossy().to_string();
             create_empty_dataset(&legacy_uri, pre_claim_check_schema()).await;
-            let mut legacy_store = RolloutStore::open(&legacy_uri).await.unwrap();
+            let legacy_store = RolloutStore::open(&legacy_uri).await.unwrap();
 
             let current_dir = TempDir::new().unwrap();
             let current_uri = current_dir.path().to_string_lossy().to_string();
@@ -3684,7 +3684,7 @@ mod tests {
         let uri = dir.path().to_string_lossy().to_string();
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
-            let mut store = RolloutStore::open(&uri).await.unwrap();
+            let store = RolloutStore::open(&uri).await.unwrap();
             // Add rows and fold them into the base table so there is data (and a
             // MemWAL index) present when we build the scalar index.
             store.add(&[assistant_record("a-0")]).await.unwrap();
@@ -3769,11 +3769,11 @@ mod tests {
             // Both merge into the shared base table concurrently.
             let (ra, rb) = tokio::join!(
                 async {
-                    let mut g = a.write().await;
+                    let g = a.write().await;
                     g.cleanup_own_shard().await
                 },
                 async {
-                    let mut g = b.write().await;
+                    let g = b.write().await;
                     g.cleanup_own_shard().await
                 },
             );
@@ -3810,7 +3810,7 @@ mod tests {
         let uri = dir.path().to_string_lossy().to_string();
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
-            let mut store = RolloutStore::open_with_options(
+            let store = RolloutStore::open_with_options(
                 &uri,
                 RolloutStoreOptions {
                     storage_options: None,
@@ -3860,7 +3860,7 @@ mod tests {
         let uri = dir.path().to_string_lossy().to_string();
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
-            let mut store = RolloutStore::open_with_options(
+            let store = RolloutStore::open_with_options(
                 &uri,
                 RolloutStoreOptions {
                     storage_options: None,
@@ -3927,7 +3927,7 @@ mod tests {
         let uri = dir.path().to_string_lossy().to_string();
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
-            let mut store = RolloutStore::open_with_options(
+            let store = RolloutStore::open_with_options(
                 &uri,
                 RolloutStoreOptions {
                     shard_id: Some("rollout-pagination".to_string()),
@@ -4028,7 +4028,7 @@ mod tests {
         let uri = dir.path().to_string_lossy().to_string();
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
-            let mut writer = RolloutStore::open_with_options(
+            let writer = RolloutStore::open_with_options(
                 &uri,
                 RolloutStoreOptions {
                     shard_id: Some("pagination-benchmark".to_string()),
@@ -4204,7 +4204,7 @@ mod tests {
         runtime.block_on(async {
             // merge_after_generations = None: appended rows stay in the WAL,
             // un-merged, so this exercises the base-miss -> WAL-fallback path.
-            let mut store = RolloutStore::open_with_options(
+            let store = RolloutStore::open_with_options(
                 &uri,
                 RolloutStoreOptions {
                     storage_options: None,
@@ -4287,7 +4287,7 @@ mod tests {
         let bytes = b"base-version-bytes";
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
-            let mut store = RolloutStore::open_with_options(
+            let store = RolloutStore::open_with_options(
                 &uri,
                 RolloutStoreOptions {
                     storage_options: None,
@@ -4326,7 +4326,7 @@ mod tests {
         let bytes = b"\x00\x01record-with-blob";
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
-            let mut store = RolloutStore::open_with_options(
+            let store = RolloutStore::open_with_options(
                 &uri,
                 RolloutStoreOptions {
                     storage_options: None,
