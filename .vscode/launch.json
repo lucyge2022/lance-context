@@ -1,0 +1,58 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Rust: Debug pypi-basic (CodeLLDB)",
+      "type": "lldb",
+      "request": "launch",
+      "program": "${workspaceFolder}/examples/pypi-basic/.venv/bin/python",
+      "args": [
+        "${workspaceFolder}/examples/pypi-basic/src/context_example/main.py"
+      ],
+      "cwd": "${workspaceFolder}/examples/pypi-basic",
+      "sourceLanguages": ["rust"],
+      "env": {
+        "RUST_BACKTRACE": "full"
+      },
+      "preLaunchTask": "maturin: develop into pypi-basic",
+      "preRunCommands": [
+        "breakpoint set --name rust_panic"
+      ]
+    },
+    {
+      "name": "Rust: Debug current Python file (CodeLLDB)",
+      "type": "lldb",
+      "request": "launch",
+      "program": "${workspaceFolder}/examples/pypi-basic/.venv/bin/python",
+      "args": ["${file}"],
+      "cwd": "${workspaceFolder}",
+      "sourceLanguages": ["rust"],
+      "env": {
+        "RUST_BACKTRACE": "full"
+      },
+      "preLaunchTask": "maturin: develop into pypi-basic",
+      "preRunCommands": [
+        "breakpoint set --name rust_panic"
+      ]
+    },
+    {
+      "name": "Rust: Attach to Python process",
+      "type": "lldb",
+      "request": "attach",
+      "pid": "${command:pickProcess}",
+      "sourceLanguages": ["rust"]
+    },
+    {
+      "name": "Python: pypi-basic",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/examples/pypi-basic/src/context_example/main.py",
+      "cwd": "${workspaceFolder}/examples/pypi-basic",
+      "python": "${workspaceFolder}/examples/pypi-basic/.venv/bin/python",
+      "justMyCode": false,
+      "env": {
+        "RUST_BACKTRACE": "full"
+      }
+    }
+  ]
+}

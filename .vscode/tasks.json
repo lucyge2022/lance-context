@@ -1,0 +1,23 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "maturin: develop into pypi-basic",
+      "type": "shell",
+      "command": "maturin develop --python ${workspaceFolder}/examples/pypi-basic/.venv/bin/python",
+      "options": {
+        "cwd": "${workspaceFolder}/python",
+        "env": {
+          "VIRTUAL_ENV": "${workspaceFolder}/examples/pypi-basic/.venv",
+          "PATH": "${workspaceFolder}/examples/pypi-basic/.venv/bin:${env:PATH}"
+        }
+      },
+      "group": "build",
+      "problemMatcher": ["$rustc"],
+      "presentation": {
+        "reveal": "silent",
+        "panel": "shared"
+      }
+    }
+  ]
+}

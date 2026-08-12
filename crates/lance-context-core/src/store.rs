@@ -1395,11 +1395,14 @@ impl ContextStore {
         }
 
         let schema = Arc::new(Schema::new(vec![relationship_field()]));
-        let mut dataset = (*self.base.current_dataset()).clone();
-        dataset
-            .add_columns(NewColumnTransform::AllNulls(schema), None, None)
+        self.base
+            .replace_dataset_with(|mut dataset| async move {
+                dataset
+                    .add_columns(NewColumnTransform::AllNulls(schema), None, None)
+                    .await?;
+                Ok(dataset)
+            })
             .await?;
-        self.base.set_dataset(dataset);
         self.base.clear_version_pin();
         Ok(true)
     }
@@ -2049,13 +2052,16 @@ impl ContextStore {
 
         let params = ScalarIndexParams::default();
 
-        let mut dataset = (*self.base.current_dataset()).clone();
-        dataset
-            .create_index_builder(&["id"], index_type, &params)
-            .name(ID_INDEX_NAME.to_string())
-            .replace(true)
+        self.base
+            .replace_dataset_with(|mut dataset| async move {
+                dataset
+                    .create_index_builder(&["id"], index_type, &params)
+                    .name(ID_INDEX_NAME.to_string())
+                    .replace(true)
+                    .await?;
+                Ok(dataset)
+            })
             .await?;
-        self.base.set_dataset(dataset);
 
         // Reload through the base so the new index is visible to subsequent
         // reads, keeping the storage options and session (a bare

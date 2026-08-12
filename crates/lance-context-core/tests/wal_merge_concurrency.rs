@@ -18,8 +18,12 @@
 //! 3. concurrent merges do not duplicate rows, and `merge_lock` excludes a
 //!    second prepare while the first `PreparedMerge` is still live;
 //! 4. an interrupted merge loses nothing (rows stay readable exactly once);
-//! 5. `add` is not blocked for the merge's duration.
+//! 5. `add` is not blocked for the merge's duration;
+//! 6. `add` is not blocked for a base-table compact's duration;
+//! 7. concurrent `refresh_latest` cannot roll the in-memory dataset handle
+//!    backwards over a merge's published version (ArcSwap RMW lost-update).
 
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -595,4 +599,93 @@ async fn append_is_not_blocked_for_the_duration_of_a_compact() {
         "the row appended during compact must be readable"
     );
     assert_eq!(ids.len(), 21, "all rows readable exactly once: {ids:?}");
+}
+
+/// Blind `ArcSwap::store` after load→modify→await lets `refresh_latest` publish
+/// an older handle over a concurrent merge append. That rolls the in-memory
+/// version backwards: object storage still has the merge, but `get_by_id` on
+/// the base handle can flaky-miss until the next refresh.
+///
+/// `dataset_write_lock` serializes every handle publisher so sampled versions
+/// never decrease and merged rows stay visible immediately after commit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn refresh_cannot_roll_back_dataset_handle_over_merge() {
+    let tmp = tempfile::tempdir().unwrap();
+    let uri = tmp.path().to_string_lossy().to_string();
+    let store = Arc::new(RwLock::new(
+        RolloutStore::open_with_options(&uri, opts("solo"))
+            .await
+            .unwrap(),
+    ));
+
+    for i in 0..12 {
+        store
+            .read()
+            .await
+            .add(&[rec(&format!("row-{i}"))])
+            .await
+            .unwrap();
+        store.read().await.flush().await.unwrap();
+    }
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let max_seen = Arc::new(AtomicU64::new(store.read().await.version()));
+    let dips = Arc::new(AtomicU64::new(0));
+    let refresher = {
+        let store = store.clone();
+        let stop = stop.clone();
+        let max_seen = max_seen.clone();
+        let dips = dips.clone();
+        tokio::spawn(async move {
+            while !stop.load(Ordering::Acquire) {
+                store.read().await.refresh_latest().await.unwrap();
+                let v = store.read().await.version();
+                let prev_max = max_seen.fetch_max(v, Ordering::SeqCst);
+                if v < prev_max {
+                    dips.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        })
+    };
+
+    // Overlap several merges with the refresh storm.
+    let mut extra = 0usize;
+    for _ in 0..3 {
+        for _ in 0..4 {
+            store
+                .read()
+                .await
+                .add(&[rec(&format!("extra-{extra}"))])
+                .await
+                .unwrap();
+            store.read().await.flush().await.unwrap();
+            extra += 1;
+        }
+        let reclaimed = merge_like_sweeper(&store).await;
+        assert!(reclaimed > 0, "merge should reclaim pending generations");
+        let v = store.read().await.version();
+        let prev_max = max_seen.fetch_max(v, Ordering::SeqCst);
+        assert!(
+            v >= prev_max,
+            "merge published version {v} below previously seen max {prev_max}"
+        );
+    }
+
+    stop.store(true, Ordering::Release);
+    refresher.await.unwrap();
+
+    assert_eq!(
+        dips.load(Ordering::SeqCst),
+        0,
+        "in-memory dataset version went backwards under concurrent refresh_latest"
+    );
+
+    // Merged rows must be visible on the resident handle without an extra reload.
+    let ids = read_ids(&store).await;
+    for i in 0..12 {
+        assert!(
+            ids.contains(&format!("row-{i}")),
+            "merged row-{i} missing from handle after refresh race: {ids:?}"
+        );
+    }
 }

@@ -275,7 +275,23 @@ pub(crate) struct StorageBase {
     /// Serializes WAL→base merge (prepare through commit). Taken with
     /// `try_lock_owned`: a loser no-ops (`Ok(0)` / `Ok(None)`). Not held by
     /// `add`/`flush`, so appends keep running while a merge is in flight.
+    ///
+    /// Does **not** alone protect [`Self::set_dataset`]: see
+    /// [`Self::dataset_write_lock`].
     merge_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Serializes every ArcSwap read-modify-write that publishes a new dataset
+    /// handle (`refresh_latest`, `checkout`, merge append, compact, reload,
+    /// schema evolution, index build).
+    ///
+    /// Taken with `lock().await` (waiters queue). Without this, a
+    /// `refresh_latest` that cloned an older handle can `store` after a merge
+    /// already published a newer one, rolling the in-memory view backwards
+    /// while object storage stays correct — flaky `get_by_id` nulls.
+    ///
+    /// Lock order: [`Self::merge_lock`] (if any) then this lock. Never acquire
+    /// `merge_lock` while holding this one. Not reentrant — release before
+    /// calling [`Self::reload`] from a path that already held it.
+    dataset_write_lock: tokio::sync::Mutex<()>,
     /// Explicit time-travel version selected by [`Self::checkout`].
     ///
     /// A point-read miss may refresh an ordinary long-lived handle to avoid a
@@ -400,6 +416,7 @@ impl StorageBase {
             merge_after_generations: merge_after_generations.unwrap_or(0),
             compaction: Mutex::new(CompactionState::default()),
             merge_lock: Arc::new(tokio::sync::Mutex::new(())),
+            dataset_write_lock: tokio::sync::Mutex::new(()),
             pinned_version: AtomicU64::new(0),
             write_writer: tokio::sync::Mutex::new(None),
         };
@@ -431,6 +448,7 @@ impl StorageBase {
             )
             .into());
         }
+        let _guard = self.dataset_write_lock.lock().await;
         let dataset = self.current_dataset().checkout_version(version_id).await?;
         self.set_dataset(dataset);
         self.pinned_version.store(version_id, Ordering::Release);
@@ -450,6 +468,7 @@ impl StorageBase {
     /// WAL merges committed by another process become visible without paying the
     /// cost of reopening the dataset and rebuilding all session caches.
     pub async fn refresh_latest(&self) -> LanceResult<()> {
+        let _guard = self.dataset_write_lock.lock().await;
         let mut dataset = (*self.current_dataset()).clone();
         dataset.checkout_latest().await?;
         self.set_dataset(dataset);
@@ -470,9 +489,30 @@ impl StorageBase {
     }
 
     /// Publish a replacement dataset handle after a mutating Lance op.
+    ///
+    /// Callers must hold [`Self::dataset_write_lock`] across the preceding
+    /// load/modify and this store; otherwise a concurrent publisher can lose
+    /// updates. Prefer [`Self::replace_dataset_with`] for the common RMW shape.
     #[inline]
     pub(crate) fn set_dataset(&self, dataset: Dataset) {
         self.dataset.store(Arc::new(dataset));
+    }
+
+    /// Clone the current handle, run `f`, and publish the result under
+    /// [`Self::dataset_write_lock`].
+    ///
+    /// Do not call [`Self::reload`] (or anything else that takes
+    /// `dataset_write_lock`) from inside `f` — the mutex is not reentrant.
+    pub(crate) async fn replace_dataset_with<F, Fut>(&self, f: F) -> LanceResult<()>
+    where
+        F: FnOnce(Dataset) -> Fut,
+        Fut: std::future::Future<Output = LanceResult<Dataset>>,
+    {
+        let _guard = self.dataset_write_lock.lock().await;
+        let dataset = (*self.current_dataset()).clone();
+        let dataset = f(dataset).await?;
+        self.set_dataset(dataset);
+        Ok(())
     }
 
     // ---------------------------------------------------------------- writes
@@ -1032,6 +1072,9 @@ impl StorageBase {
                 ..Default::default()
             });
         }
+        // Hold dataset_write_lock across append+store so a concurrent
+        // refresh_latest cannot blind-store an older handle over this commit.
+        let _guard = self.dataset_write_lock.lock().await;
         let mut dataset = (*self.current_dataset()).clone();
         dataset.append(reader, Some(params)).await?;
         self.set_dataset(dataset);
@@ -1062,15 +1105,17 @@ impl StorageBase {
             .cloned()
             .collect::<Vec<_>>();
         if !missing_fields.is_empty() {
-            let mut dataset = (*self.current_dataset()).clone();
-            dataset
-                .add_columns(
-                    NewColumnTransform::AllNulls(Arc::new(Schema::new(missing_fields))),
-                    None,
-                    None,
-                )
-                .await?;
-            self.set_dataset(dataset);
+            self.replace_dataset_with(|mut dataset| async move {
+                dataset
+                    .add_columns(
+                        NewColumnTransform::AllNulls(Arc::new(Schema::new(missing_fields))),
+                        None,
+                        None,
+                    )
+                    .await?;
+                Ok(dataset)
+            })
+            .await?;
         }
         Ok(())
     }
@@ -1119,15 +1164,24 @@ impl StorageBase {
             ..Default::default()
         };
 
-        let mut dataset = (*self.current_dataset()).clone();
-        let result = match config.max_source_fragments {
-            Some(max_source_fragments) => {
-                compact_files_incremental(&mut dataset, lance_options, max_source_fragments.max(1))
+        // Compact under dataset_write_lock; release before reload (not reentrant).
+        let result = {
+            let _guard = self.dataset_write_lock.lock().await;
+            let mut dataset = (*self.current_dataset()).clone();
+            let result = match config.max_source_fragments {
+                Some(max_source_fragments) => {
+                    compact_files_incremental(
+                        &mut dataset,
+                        lance_options,
+                        max_source_fragments.max(1),
+                    )
                     .await
-            }
-            None => compact_files(&mut dataset, lance_options, None).await,
+                }
+                None => compact_files(&mut dataset, lance_options, None).await,
+            };
+            self.set_dataset(dataset);
+            result
         };
-        self.set_dataset(dataset);
 
         match result {
             Ok(metrics) => {
@@ -1175,17 +1229,20 @@ impl StorageBase {
     /// scan of those generations.
     pub async fn create_key_zonemap_index(&self) -> LanceResult<()> {
         info!(column = %self.key_column, "creating ZoneMap index on key column");
-        let mut dataset = (*self.current_dataset()).clone();
-        dataset
-            .create_index_builder(
-                &[self.key_column.as_str()],
-                IndexType::ZoneMap,
-                &ScalarIndexParams::default(),
-            )
-            .name(ID_INDEX_NAME.to_string())
-            .replace(true)
-            .await?;
-        self.set_dataset(dataset);
+        let key_column = self.key_column.clone();
+        self.replace_dataset_with(|mut dataset| async move {
+            dataset
+                .create_index_builder(
+                    &[key_column.as_str()],
+                    IndexType::ZoneMap,
+                    &ScalarIndexParams::default(),
+                )
+                .name(ID_INDEX_NAME.to_string())
+                .replace(true)
+                .await?;
+            Ok(dataset)
+        })
+        .await?;
         // Reload the handle so subsequent reads on this instance observe the new
         // index (mirrors the reload done after `compact`).
         self.reload().await
@@ -1232,6 +1289,9 @@ impl StorageBase {
     /// the shared session and storage options are never dropped.
     pub async fn reload(&self) -> LanceResult<()> {
         let uri = self.uri();
+        // Hold the lock across open+store so a concurrent RMW cannot publish
+        // an older handle over this reload (or vice versa).
+        let _guard = self.dataset_write_lock.lock().await;
         let dataset =
             Self::load_with_options(&uri, self.storage_options.clone(), self.session.clone())
                 .await?;
@@ -1257,15 +1317,23 @@ impl StorageBase {
         if self.mem_wal_index_present().await? {
             return Ok(());
         }
-        let mut dataset = (*self.current_dataset()).clone();
-        match dataset.initialize_mem_wal().unsharded().execute().await {
-            Ok(()) => {
-                self.set_dataset(dataset);
-                Ok(())
+        let init_result = {
+            let _guard = self.dataset_write_lock.lock().await;
+            let mut dataset = (*self.current_dataset()).clone();
+            match dataset.initialize_mem_wal().unsharded().execute().await {
+                Ok(()) => {
+                    self.set_dataset(dataset);
+                    Ok(())
+                }
+                Err(err) => Err(err),
             }
+        };
+        match init_result {
+            Ok(()) => Ok(()),
             Err(err) => {
                 // A concurrent first-writer may have created the index between
                 // our check and our commit. Reload and accept it if so.
+                // (reload takes dataset_write_lock — must not hold it here.)
                 self.reload().await?;
                 if self.mem_wal_index_present().await? {
                     Ok(())

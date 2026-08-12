@@ -2179,11 +2179,14 @@ mod tests {
             vec![Ok::<RecordBatch, ArrowError>(base_batch)].into_iter(),
             base_schema,
         );
-        {
-            let mut dataset = (*store.base.current_dataset()).clone();
-            dataset.append(base_reader, None).await.unwrap();
-            store.base.set_dataset(dataset);
-        }
+        store
+            .base
+            .replace_dataset_with(|mut dataset| async move {
+                dataset.append(base_reader, None).await?;
+                Ok(dataset)
+            })
+            .await
+            .unwrap();
 
         store.add(&[assistant_record("legacy-wal")]).await.unwrap();
         store.flush().await.unwrap();
@@ -2197,18 +2200,20 @@ mod tests {
                 .filter(|field| legacy_schema.field_with_name(field.name()).is_err())
                 .cloned()
                 .collect::<Vec<_>>();
-            {
-                let mut dataset = (*store.base.current_dataset()).clone();
-                dataset
-                    .add_columns(
-                        NewColumnTransform::AllNulls(Arc::new(Schema::new(claim_check_fields))),
-                        None,
-                        None,
-                    )
-                    .await
-                    .unwrap();
-                store.base.set_dataset(dataset);
-            }
+            store
+                .base
+                .replace_dataset_with(|mut dataset| async move {
+                    dataset
+                        .add_columns(
+                            NewColumnTransform::AllNulls(Arc::new(Schema::new(claim_check_fields))),
+                            None,
+                            None,
+                        )
+                        .await?;
+                    Ok(dataset)
+                })
+                .await
+                .unwrap();
         }
 
         (dir, store)
@@ -3643,11 +3648,14 @@ mod tests {
                 vec![Ok::<RecordBatch, ArrowError>(aligned)].into_iter(),
                 merge_schema,
             );
-            {
-                let mut dataset = (*legacy_store.base.current_dataset()).clone();
-                dataset.append(reader, None).await.unwrap();
-                legacy_store.base.set_dataset(dataset);
-            }
+            legacy_store
+                .base
+                .replace_dataset_with(|mut dataset| async move {
+                    dataset.append(reader, None).await?;
+                    Ok(dataset)
+                })
+                .await
+                .unwrap();
 
             let merged = legacy_store
                 .get_by_id_source("current-generation", ListSource::Fragments)
