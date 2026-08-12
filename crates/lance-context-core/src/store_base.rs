@@ -431,10 +431,7 @@ impl StorageBase {
             )
             .into());
         }
-        let dataset = self
-            .current_dataset()
-            .checkout_version(version_id)
-            .await?;
+        let dataset = self.current_dataset().checkout_version(version_id).await?;
         self.set_dataset(dataset);
         self.pinned_version.store(version_id, Ordering::Release);
         Ok(())
@@ -1125,12 +1122,8 @@ impl StorageBase {
         let mut dataset = (*self.current_dataset()).clone();
         let result = match config.max_source_fragments {
             Some(max_source_fragments) => {
-                compact_files_incremental(
-                    &mut dataset,
-                    lance_options,
-                    max_source_fragments.max(1),
-                )
-                .await
+                compact_files_incremental(&mut dataset, lance_options, max_source_fragments.max(1))
+                    .await
             }
             None => compact_files(&mut dataset, lance_options, None).await,
         };
@@ -1239,12 +1232,9 @@ impl StorageBase {
     /// the shared session and storage options are never dropped.
     pub async fn reload(&self) -> LanceResult<()> {
         let uri = self.uri();
-        let dataset = Self::load_with_options(
-            &uri,
-            self.storage_options.clone(),
-            self.session.clone(),
-        )
-        .await?;
+        let dataset =
+            Self::load_with_options(&uri, self.storage_options.clone(), self.session.clone())
+                .await?;
         self.set_dataset(dataset);
         self.clear_version_pin();
         Ok(())
@@ -1268,12 +1258,7 @@ impl StorageBase {
             return Ok(());
         }
         let mut dataset = (*self.current_dataset()).clone();
-        match dataset
-            .initialize_mem_wal()
-            .unsharded()
-            .execute()
-            .await
-        {
+        match dataset.initialize_mem_wal().unsharded().execute().await {
             Ok(()) => {
                 self.set_dataset(dataset);
                 Ok(())
@@ -1308,7 +1293,8 @@ impl StorageBase {
     /// Open a flushed generation dataset, inheriting the base dataset's session
     /// and this store's storage options.
     pub async fn open_flushed_dataset(&self, uri: &str) -> LanceResult<Dataset> {
-        let mut builder = DatasetBuilder::from_uri(uri).with_session(self.current_dataset().session());
+        let mut builder =
+            DatasetBuilder::from_uri(uri).with_session(self.current_dataset().session());
         if let Some(options) = self.storage_options.clone() {
             builder = builder.with_storage_options(options);
         }
