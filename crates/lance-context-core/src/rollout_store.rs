@@ -914,12 +914,15 @@ impl RolloutStore {
 
     async fn list_all_non_blob_records(&self) -> LanceResult<Vec<RolloutRecord>> {
         let columns = Arc::new(self.non_blob_columns());
-        let target_schema = Arc::new(projected_arrow_schema(&self.base.dataset, &columns)?);
+        let target_schema = Arc::new(projected_arrow_schema(
+            self.base.current_dataset().as_ref(),
+            &columns,
+        )?);
         let mut records_by_id = HashMap::new();
         let mut records = Vec::new();
 
         Self::append_non_blob_records_from_dataset(
-            self.base.dataset.clone(),
+            (*self.base.current_dataset()).clone(),
             columns.clone(),
             target_schema.clone(),
             &mut records_by_id,
