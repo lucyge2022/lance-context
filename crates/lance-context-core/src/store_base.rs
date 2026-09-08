@@ -30,7 +30,7 @@
 //! # Dataset-handle publish
 //!
 //! Readers `ArcSwap::load` a snapshot and never take a writer lock. Every
-//! replacement of the handle takes [`StorageBase::write_writer`]:
+//! replacement of the handle takes [`StorageBase::dataset_write_lock`]:
 //!
 //! - **Single RMW** ([`StorageBase::call_dataset_mut_fn`],
 //!   [`StorageBase::call_dataset_with`]): lock → mutate → `set_dataset`.
@@ -38,8 +38,15 @@
 //!   covers several publishes so a concurrent `checkout` cannot land between
 //!   them. Nesting is task-local; another task always waits on the mutex.
 //!
-//! Steady-state MemWAL `put`s clone the resident `ShardWriter` and do **not**
-//! hold this lock; only first-open / fence-reopen and handle publish do.
+//! [`StorageBase::write_writer`] is a **different** mutex: it only guards the
+//! resident [`ShardWriter`] slot (first-open / fence reopen). Steady-state
+//! `put`s clone that `Arc` under the slot lock and do **not** take
+//! `dataset_write_lock`, so ingest is not stalled by compact / merge append.
+//!
+//! Lock order when more than one is held: `merge_lock`, then
+//! `dataset_write_lock`, then `write_writer`. Never acquire an earlier lock
+//! while holding a later one. Do not take `merge_lock` or `write_writer` from
+//! inside a dataset-publish critical section.
 //!
 //! # What stays in the concrete store
 //!
@@ -54,17 +61,17 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 tokio::task_local! {
-    /// Set while *this task* holds [`StorageBase::write_writer`] for exclusive
-    /// handle publish / nested RMW.
+    /// Set while *this task* holds [`StorageBase::dataset_write_lock`] for
+    /// exclusive handle publish / nested RMW.
     ///
     /// Must be task-local: a shared `AtomicBool` would let a *different* task
     /// observe "held" and skip the mutex, defeating the critical section.
-    static WRITE_WRITER_HELD: ();
+    static DATASET_WRITE_HELD: ();
 }
 
 #[inline]
-fn exclusive_writer_held_here() -> bool {
-    WRITE_WRITER_HELD.try_with(|_| ()).is_ok()
+fn dataset_write_held_here() -> bool {
+    DATASET_WRITE_HELD.try_with(|_| ()).is_ok()
 }
 
 use arc_swap::ArcSwap;
@@ -335,8 +342,9 @@ pub(crate) struct StorageBase {
     /// `add`/`flush`, so appends keep running while a merge is in flight.
     ///
     /// Does **not** alone protect [`Self::set_dataset`]. Handle publish is
-    /// exclusive under [`Self::write_writer`]. Lock order: this lock, then
-    /// `write_writer`. Never acquire this while holding `write_writer`.
+    /// [`Self::dataset_write_lock`]. Lock order: this lock, then
+    /// `dataset_write_lock`, then `write_writer`. Never acquire this while
+    /// holding either of the later locks.
     merge_lock: Arc<tokio::sync::Mutex<()>>,
     /// Explicit time-travel version selected by [`Self::checkout`].
     ///
@@ -347,16 +355,18 @@ pub(crate) struct StorageBase {
     /// `0` means unpinned; any other value is the pinned manifest version.
     /// (Lance dataset versions are 1-based, so `0` is never a real pin.)
     pinned_version: AtomicU64,
-    /// Resident MemWAL writer for this instance's shard, wrapped for `&self`
-    /// concurrent access.
+    /// Exclusive lock for every dataset-handle RMW (`checkout`,
+    /// `refresh_latest`, merge append, compact, reload, schema/index).
+    /// Multi-step publishers use [`Self::with_exclusive_writer`]; nesting is
+    /// task-local so only the holding task skips re-acquire.
     ///
-    /// Also the exclusive lock for every dataset-handle RMW (`checkout`,
-    /// `refresh_latest`, merge append, compact, reload, schema/index). Held
-    /// only to fetch-or-open / invalidate the `ShardWriter` (see
-    /// [`Self::resident_writer`]) or across a handle publish — **never** across
-    /// `put`, so steady-state appends run concurrently. Multi-step publishers
-    /// use [`Self::with_exclusive_writer`]; nesting is task-local so only the
-    /// holding task skips re-acquire.
+    /// Not the MemWAL writer slot — that is [`Self::write_writer`].
+    dataset_write_lock: tokio::sync::Mutex<()>,
+    /// Resident MemWAL writer for this instance's shard.
+    ///
+    /// Held only to fetch-or-open / invalidate the [`ShardWriter`] (see
+    /// [`Self::resident_writer`]) — **never** across `put` and never across
+    /// handle publish, so ingest does not wait on compact / merge append.
     write_writer: tokio::sync::Mutex<Option<Arc<ShardWriter>>>,
 }
 
@@ -472,6 +482,7 @@ impl StorageBase {
             compaction: Mutex::new(CompactionState::default()),
             merge_lock: Arc::new(tokio::sync::Mutex::new(())),
             pinned_version: AtomicU64::new(0),
+            dataset_write_lock: tokio::sync::Mutex::new(()),
             write_writer: tokio::sync::Mutex::new(None),
         };
         // `ensure_mem_wal` may reload the dataset on a concurrent first-writer
@@ -499,7 +510,8 @@ impl StorageBase {
     /// Lance's `checkout_version` takes `&self` and returns a **new** `Dataset`
     /// handle aimed at that manifest (same URI/session, different view) — it
     /// does not mutate the caller's value in place. Publishing is exclusive
-    /// under [`Self::write_writer`] so an older version can actually be pinned.
+    /// under [`Self::dataset_write_lock`] so an older version can actually be
+    /// pinned.
     pub async fn checkout(&self, version_id: u64) -> LanceResult<()> {
         if version_id == 0 {
             return Err(ArrowError::InvalidArgumentError(
@@ -560,25 +572,25 @@ impl StorageBase {
     }
 
     /// Build a new handle from the current one (or ignore it — e.g.
-    /// [`Self::reload`]) and publish it under [`Self::write_writer`].
+    /// [`Self::reload`]) and publish it under [`Self::dataset_write_lock`].
     ///
     /// Nested publishes from [`Self::with_exclusive_writer`] reuse that section
     /// instead of acquiring the lock again.
     ///
     /// `f` receives the current `Arc<Dataset>` and returns `(new_handle, out)`.
     /// The handle is published only if `f` succeeds. Do not call
-    /// [`Self::reload`] (or anything else that takes `write_writer`) from
+    /// [`Self::reload`] (or anything else that takes `dataset_write_lock`) from
     /// inside `f` — the mutex is not reentrant.
     pub(crate) async fn call_dataset_with<F, Fut, T>(&self, f: F) -> LanceResult<T>
     where
         F: FnOnce(Arc<Dataset>) -> Fut,
         Fut: std::future::Future<Output = LanceResult<(Dataset, T)>>,
     {
-        if exclusive_writer_held_here() {
+        if dataset_write_held_here() {
             return self.call_dataset_with_locked(f).await;
         }
-        let _guard = self.write_writer.lock().await;
-        WRITE_WRITER_HELD
+        let _guard = self.dataset_write_lock.lock().await;
+        DATASET_WRITE_HELD
             .scope((), self.call_dataset_with_locked(f))
             .await
     }
@@ -612,21 +624,21 @@ impl StorageBase {
         .await
     }
 
-    /// Run `f` under one exclusive `write_writer` section so multiple handle
-    /// publishes compose.
+    /// Run `f` under one exclusive `dataset_write_lock` section so multiple
+    /// handle publishes compose.
     ///
     /// Nesting is allowed only for the **same task** (via
-    /// [`WRITE_WRITER_HELD`]); other tasks block on the mutex.
+    /// [`DATASET_WRITE_HELD`]); other tasks block on the mutex.
     pub(crate) async fn with_exclusive_writer<F, Fut, T>(&self, f: F) -> LanceResult<T>
     where
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = LanceResult<T>>,
     {
-        if exclusive_writer_held_here() {
+        if dataset_write_held_here() {
             return f().await;
         }
-        let _guard = self.write_writer.lock().await;
-        WRITE_WRITER_HELD.scope((), f()).await
+        let _guard = self.dataset_write_lock.lock().await;
+        DATASET_WRITE_HELD.scope((), f()).await
     }
 
     /// Test-only pause point after modify, before the handle is published.
@@ -2034,9 +2046,9 @@ mod dataset_handle_rmw_tests {
         }
     }
 
-    /// Refresh holds `write_writer` across checkout_latest→store, so a concurrent
-    /// merge cannot publish in between. After refresh completes, merge proceeds
-    /// and the in-memory version never goes backwards.
+    /// Refresh holds `dataset_write_lock` across checkout_latest→store, so a
+    /// concurrent merge cannot publish in between. After refresh completes,
+    /// merge proceeds and the in-memory version never goes backwards.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn merge_waits_on_refresh_write_writer() {
         use std::time::Duration;
@@ -2090,7 +2102,7 @@ mod dataset_handle_rmw_tests {
         tokio::time::sleep(Duration::from_millis(150)).await;
         assert!(
             !merger.is_finished(),
-            "merge must wait on write_writer held by refresh"
+            "merge must wait on dataset_write_lock held by refresh"
         );
 
         proceed.notify_one();
